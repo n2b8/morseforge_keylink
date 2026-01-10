@@ -25,15 +25,8 @@ npm install
 npx expo run:ios
 ```
 
-Or build and install using Expo Go:
-
-```bash
-npx expo start
-```
-
-Then scan the QR code with your iPhone.
-
-**Note:** BLE functionality requires a physical device - it won't work in the simulator.
+**Note:** BLE requires a physical device and a native build. Expo Go does not include
+`react-native-ble-manager`, so use a dev build (see `BUILDING.md`).
 
 ### 3. Flash your ESP32 device
 
@@ -43,6 +36,8 @@ Make sure your ESP32 is flashed with the firmware from `../software/code.py`. Th
 
 1. Open the app on your iPhone
 2. Tap "Scan" to search for nearby BLE devices
+   - Default scan uses the Nordic UART (NUS) service filter
+   - Switch to "All" if you want to see every nearby BLE device
 3. Tap "Connect" on your "MorseKey" device
 4. Press your morse key paddles - you should hear tones!
 
@@ -111,6 +106,11 @@ eas build --platform android
 - Ensure ESP32 is powered on and running code.py
 - Device must advertise as "MorseKey"
 - Check BLE permissions are granted
+- In the app, try switching Scan Filter to "All"
+- Verify the device is visible in a scanner app (nRF Connect / LightBlue)
+- If the device prints "BLE libraries not found", install `adafruit_ble` into `CIRCUITPY/lib`
+- On Android 11 and below, Location Services must be enabled for BLE scanning
+- Ensure `newArchEnabled` is true in `app.json` (required for `react-native-ble-manager`)
 
 ### No audio on key press
 - Check phone is not in silent mode (iOS)

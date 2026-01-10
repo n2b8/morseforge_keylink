@@ -9,7 +9,7 @@ import {
   Platform,
   PermissionsAndroid,
 } from 'react-native';
-import {BleManager} from 'react-native-ble-plx';
+import BleManager from 'react-native-ble-manager';
 import {Audio} from 'expo-av';
 import {Buffer} from 'buffer';
 
@@ -18,12 +18,78 @@ global.Buffer = global.Buffer || Buffer;
 // BLE UART Service (Nordic UART Service standard UUIDs)
 const SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 const CHAR_UUID_TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';  // Notifications from device
-const SCAN_SERVICE_UUIDS = null;
+const SCAN_SERVICE_UUIDS = [SERVICE_UUID];
 const DEVICE_NAME_PREFIX = 'MorseKey';
+const SCAN_TIMEOUT_S = 12;
+const SCAN_FILTERS = {
+  SERVICE: 'service',
+  ALL: 'all',
+};
 
 const DIT_MS = 60;
 const DAH_MS = 180;
 const MAX_LOG_ITEMS = 60;
+
+const normalizeRssi = (rssi) =>
+  typeof rssi === 'number' ? rssi : -999;
+
+const normalizeUuid = (uuid) => (uuid ? uuid.toLowerCase() : '');
+
+const shortUuid = (uuid) => (uuid ? uuid.split('-')[0] : '');
+
+const formatServiceUuids = (uuids) => {
+  if (!uuids || uuids.length === 0) {
+    return 'none';
+  }
+  return uuids.map(shortUuid).join(', ');
+};
+
+const sortDevices = (list) =>
+  [...list].sort((a, b) => {
+    if (a.isTarget !== b.isTarget) {
+      return a.isTarget ? -1 : 1;
+    }
+    return normalizeRssi(b.rssi) - normalizeRssi(a.rssi);
+  });
+
+const withTimeout = (promise, timeoutMs, label) =>
+  new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    promise
+      .then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
+
+const formatBleState = (state) => {
+  switch (state) {
+    case 'on':
+      return 'PoweredOn';
+    case 'off':
+      return 'PoweredOff';
+    case 'unauthorized':
+      return 'Unauthorized';
+    case 'unsupported':
+      return 'Unsupported';
+    case 'resetting':
+      return 'Resetting';
+    case 'unknown':
+      return 'Unknown';
+    case 'turning_on':
+      return 'TurningOn';
+    case 'turning_off':
+      return 'TurningOff';
+    default:
+      return state || 'Unknown';
+  }
+};
 
 // Keyer modes
 const KEYER_MODES = {
@@ -32,15 +98,23 @@ const KEYER_MODES = {
   IAMBIC_B: 'iambic_b',
 };
 
-const parseEvent = (base64Value) => {
-  if (!base64Value) {
+const parseEvent = (value) => {
+  if (!value) {
     return null;
   }
 
   let data;
-  try {
-    data = Buffer.from(base64Value, 'base64');
-  } catch (error) {
+  if (Array.isArray(value)) {
+    data = Buffer.from(value);
+  } else if (value instanceof Uint8Array) {
+    data = Buffer.from(value);
+  } else if (typeof value === 'string') {
+    try {
+      data = Buffer.from(value, 'base64');
+    } catch (error) {
+      return null;
+    }
+  } else {
     return null;
   }
 
@@ -192,15 +266,20 @@ const useTonePlayer = () => {
 };
 
 export default function App() {
-  const managerRef = useRef(new BleManager());
-  const monitorRef = useRef(null);
+  const scanStopReasonRef = useRef(null);
+  const devicesByIdRef = useRef(new Map());
+  const scanFilterRef = useRef(SCAN_FILTERS.SERVICE);
+  const connectedDeviceRef = useRef(null);
+  const handleEventRef = useRef(null);
   const [devices, setDevices] = useState([]);
   const [scanning, setScanning] = useState(false);
+  const [scanFilter, setScanFilter] = useState(SCAN_FILTERS.SERVICE);
   const [connectedDevice, setConnectedDevice] = useState(null);
   const [logs, setLogs] = useState([]);
   const [keyerMode, setKeyerMode] = useState(KEYER_MODES.STRAIGHT);
   const [key1Pressed, setKey1Pressed] = useState(false);
   const [key2Pressed, setKey2Pressed] = useState(false);
+  const [bleState, setBleState] = useState('unknown');
   const iambicStateRef = useRef({lastKey: null, needsAlternate: false});
   const {ready: toneReady, isPlaying, playContinuous, playOneShot, stop} =
     useTonePlayer();
@@ -239,8 +318,8 @@ export default function App() {
   }, []);
 
   const stopScan = useCallback(() => {
-    managerRef.current.stopDeviceScan();
-    setScanning(false);
+    scanStopReasonRef.current = 'manual';
+    BleManager.stopScan().catch(() => {});
   }, []);
 
   const startScan = useCallback(async () => {
@@ -250,41 +329,115 @@ export default function App() {
       return;
     }
 
+    try {
+      const started = await BleManager.isStarted();
+      if (!started) {
+        await BleManager.start({showAlert: false});
+      }
+    } catch (error) {
+      addLog(`BLE init failed: ${error.message || error}`);
+    }
+
+    // Check BLE state
+    let state = 'unknown';
+    try {
+      state = await BleManager.checkState();
+    } catch (error) {
+      addLog(`BLE state check failed: ${error.message || error}`);
+    }
+    addLog(`BLE State: ${state}`);
+    setBleState(state);
+
+    if (state !== 'on') {
+      if (state === 'unauthorized') {
+        addLog('Bluetooth permission not granted. Enable it in Settings.');
+      } else if (state === 'unsupported') {
+        addLog('Bluetooth is not supported on this device.');
+      } else if (state === 'off') {
+        addLog('Bluetooth is off. Please enable it in Settings.');
+      } else {
+        addLog('Bluetooth is not ready yet. Please try again.');
+      }
+      return;
+    }
+
+    devicesByIdRef.current.clear();
     setDevices([]);
     setScanning(true);
-    addLog('Scanning for devices...');
 
-    managerRef.current.startDeviceScan(
-      SCAN_SERVICE_UUIDS,
-      null,
-      (error, device) => {
-        if (error) {
-          addLog(`Scan error: ${error.message}`);
-          setScanning(false);
-          return;
-        }
+    const scanServiceUuids =
+      scanFilter === SCAN_FILTERS.SERVICE ? SCAN_SERVICE_UUIDS : [];
 
-        if (!device) {
-          return;
-        }
-
-        const name = device.name || device.localName || 'Unnamed device';
-        if (DEVICE_NAME_PREFIX) {
-          const prefix = DEVICE_NAME_PREFIX.toLowerCase();
-          if (!name.toLowerCase().startsWith(prefix)) {
-            return;
-          }
-        }
-
-        setDevices((prev) => {
-          if (prev.some((item) => item.id === device.id)) {
-            return prev;
-          }
-          return [...prev, {id: device.id, name}];
-        });
-      }
+    addLog(
+      scanFilter === SCAN_FILTERS.SERVICE
+        ? `Scan started (filter: NUS ${shortUuid(SERVICE_UUID)}...)`
+        : 'Scan started (all devices)...'
     );
-  }, [addLog, requestBlePermissions]);
+    scanStopReasonRef.current = null;
+
+    try {
+      await BleManager.scan({
+        serviceUUIDs: scanServiceUuids,
+        seconds: SCAN_TIMEOUT_S,
+        allowDuplicates: true,
+      });
+    } catch (error) {
+      setScanning(false);
+      addLog(`Scan error: ${error.message || error}`);
+    }
+  }, [addLog, requestBlePermissions, scanFilter]);
+
+  const handleDiscoverPeripheral = useCallback(
+    (peripheral) => {
+      if (!peripheral) {
+        addLog('Received null peripheral from scan');
+        return;
+      }
+
+      const name =
+        peripheral.name ||
+        peripheral.advertising?.localName ||
+        'Unnamed device';
+      const serviceUUIDs = (peripheral.advertising?.serviceUUIDs || []).map(
+        normalizeUuid
+      );
+      const entry = {
+        id: peripheral.id,
+        name,
+        rssi: peripheral.rssi ?? null,
+        serviceUUIDs,
+        isTarget:
+          name.startsWith(DEVICE_NAME_PREFIX) ||
+          serviceUUIDs.includes(SERVICE_UUID),
+      };
+
+      const existing = devicesByIdRef.current.get(entry.id);
+      const nameUpgraded =
+        existing &&
+        existing.name === 'Unnamed device' &&
+        entry.name !== 'Unnamed device';
+      if (!existing || nameUpgraded) {
+        const rssiLabel = entry.rssi !== null ? entry.rssi : 'n/a';
+        addLog(
+          `Found: ${entry.name} (${entry.id.slice(0, 8)}..., RSSI ${rssiLabel}, services ${formatServiceUuids(
+            entry.serviceUUIDs
+          )})`
+        );
+      }
+
+      devicesByIdRef.current.set(entry.id, entry);
+      setDevices((prev) => {
+        const index = prev.findIndex((item) => item.id === entry.id);
+        if (index >= 0) {
+          const updated = [...prev];
+          updated[index] = {...updated[index], ...entry};
+          return sortDevices(updated);
+        }
+        return sortDevices([...prev, entry]);
+      });
+    },
+    [addLog]
+  );
 
   const handleEvent = useCallback(
     (event) => {
@@ -344,6 +497,18 @@ export default function App() {
     [keyerMode, key1Pressed, key2Pressed, playContinuous, playOneShot, stop]
   );
 
+  useEffect(() => {
+    scanFilterRef.current = scanFilter;
+  }, [scanFilter]);
+
+  useEffect(() => {
+    connectedDeviceRef.current = connectedDevice;
+  }, [connectedDevice]);
+
+  useEffect(() => {
+    handleEventRef.current = handleEvent;
+  }, [handleEvent]);
+
   const connectToDevice = useCallback(
     async (device) => {
       if (!device?.id) {
@@ -354,54 +519,31 @@ export default function App() {
       addLog(`Connecting to ${device.name || device.id}...`);
 
       try {
-        const connected = await managerRef.current.connectToDevice(device.id);
-        await connected.discoverAllServicesAndCharacteristics();
-        setConnectedDevice(connected);
-        addLog('Connected. Listening for key events.');
-
-        monitorRef.current?.remove();
-        monitorRef.current = connected.monitorCharacteristicForService(
-          SERVICE_UUID,
-          CHAR_UUID_TX,
-          (error, characteristic) => {
-            if (error) {
-              addLog(`Notify error: ${error.message}`);
-              return;
-            }
-
-            if (!characteristic?.value) {
-              return;
-            }
-
-            const event = parseEvent(characteristic.value);
-            if (event) {
-              if (event.type === 'RAW') {
-                addLog(`RX ${event.payload}`);
-              } else if (event.type === 'KEY_STATE') {
-                const keyName = event.key === 1 ? 'K1' : 'K2';
-                const state = event.pressed ? 'DOWN' : 'UP';
-                addLog(`${keyName} ${state}`);
-              }
-              handleEvent(event);
-            }
-          }
+        await withTimeout(
+          BleManager.connect(device.id),
+          12000,
+          'Connect'
         );
-
-        connected.onDisconnected((error) => {
-          if (error) {
-            addLog(`Disconnected: ${error.message}`);
-          } else {
-            addLog('Disconnected.');
-          }
-          stop();
-          setConnectedDevice(null);
-        });
+        addLog('Connected. Discovering services...');
+        await withTimeout(
+          BleManager.retrieveServices(device.id),
+          8000,
+          'Service discovery'
+        );
+        addLog('Enabling notifications...');
+        await withTimeout(
+          BleManager.startNotification(device.id, SERVICE_UUID, CHAR_UUID_TX),
+          8000,
+          'Start notification'
+        );
+        setConnectedDevice(device);
+        addLog('Connected. Listening for key events.');
       } catch (error) {
         addLog(`Connect error: ${error.message || error}`);
         setConnectedDevice(null);
       }
     },
-    [addLog, handleEvent, stop, stopScan]
+    [addLog, stopScan]
   );
 
   const disconnect = useCallback(async () => {
@@ -410,9 +552,7 @@ export default function App() {
     }
 
     try {
-      monitorRef.current?.remove();
-      monitorRef.current = null;
-      await connectedDevice.cancelConnection();
+      await BleManager.disconnect(connectedDevice.id);
     } catch (error) {
       addLog(`Disconnect error: ${error.message || error}`);
     }
@@ -423,11 +563,74 @@ export default function App() {
   }, [addLog, connectedDevice, stop]);
 
   useEffect(() => {
+    BleManager.start({showAlert: false}).catch((error) => {
+      addLog(`BLE init failed: ${error.message || error}`);
+    });
+
+    const subscriptions = [
+      BleManager.onDidUpdateState(({state}) => {
+        addLog(`BLE state changed: ${state}`);
+        setBleState(state);
+
+        if (state === 'on') {
+          addLog('Bluetooth is ready. You can now scan for devices.');
+        } else if (state === 'unauthorized') {
+          addLog('Bluetooth permission not granted. Enable it in Settings.');
+        } else if (state === 'unsupported') {
+          addLog('Bluetooth is not supported on this device.');
+        }
+      }),
+      BleManager.onStopScan(() => {
+        setScanning(false);
+        if (scanStopReasonRef.current === 'manual') {
+          addLog('Scan stopped.');
+        } else {
+          addLog('Scan completed.');
+        }
+        scanStopReasonRef.current = null;
+        if (
+          devicesByIdRef.current.size === 0 &&
+          scanFilterRef.current === SCAN_FILTERS.SERVICE
+        ) {
+          addLog('No NUS devices found. Try switching Scan Filter to All.');
+        }
+      }),
+      BleManager.onDiscoverPeripheral(handleDiscoverPeripheral),
+      BleManager.onDidUpdateValueForCharacteristic((data) => {
+        if (!data || data.value == null) {
+          return;
+        }
+
+        const event = parseEvent(data.value);
+        if (event) {
+          if (event.type === 'RAW') {
+            addLog(`RX ${event.payload}`);
+          } else if (event.type === 'KEY_STATE') {
+            const keyName = event.key === 1 ? 'K1' : 'K2';
+            const state = event.pressed ? 'DOWN' : 'UP';
+            addLog(`${keyName} ${state}`);
+          }
+          handleEventRef.current?.(event);
+        }
+      }),
+      BleManager.onDisconnectPeripheral(({peripheral}) => {
+        const current = connectedDeviceRef.current;
+        if (current && current.id === peripheral) {
+          addLog('Disconnected.');
+          stop();
+          setConnectedDevice(null);
+        }
+      }),
+    ];
+
+    BleManager.checkState()
+      .then((state) => setBleState(state))
+      .catch(() => {});
+
     return () => {
-      monitorRef.current?.remove();
-      managerRef.current.destroy();
+      subscriptions.forEach((subscription) => subscription.remove());
     };
-  }, []);
+  }, [addLog, handleDiscoverPeripheral, stop]);
 
   return (
     <SafeAreaView style={styles.container}>
@@ -439,6 +642,10 @@ export default function App() {
       </View>
 
       <View style={styles.statusRow}>
+        <View style={styles.statusBlock}>
+          <Text style={styles.label}>BLE</Text>
+          <Text style={styles.value}>{formatBleState(bleState)}</Text>
+        </View>
         <View style={styles.statusBlock}>
           <Text style={styles.label}>Status</Text>
           <Text style={styles.value}>
@@ -544,6 +751,49 @@ export default function App() {
         </Pressable>
       </View>
 
+      <View style={styles.scanSelector}>
+        <Text style={styles.label}>Scan Filter</Text>
+        <View style={styles.modeButtons}>
+          <Pressable
+            style={[
+              styles.modeButton,
+              scanFilter === SCAN_FILTERS.SERVICE && styles.modeButtonActive,
+              scanning && styles.buttonDisabled,
+            ]}
+            onPress={() => setScanFilter(SCAN_FILTERS.SERVICE)}
+            disabled={scanning}
+          >
+            <Text
+              style={[
+                styles.modeButtonText,
+                scanFilter === SCAN_FILTERS.SERVICE &&
+                  styles.modeButtonTextActive,
+              ]}
+            >
+              NUS
+            </Text>
+          </Pressable>
+          <Pressable
+            style={[
+              styles.modeButton,
+              scanFilter === SCAN_FILTERS.ALL && styles.modeButtonActive,
+              scanning && styles.buttonDisabled,
+            ]}
+            onPress={() => setScanFilter(SCAN_FILTERS.ALL)}
+            disabled={scanning}
+          >
+            <Text
+              style={[
+                styles.modeButtonText,
+                scanFilter === SCAN_FILTERS.ALL && styles.modeButtonTextActive,
+              ]}
+            >
+              All
+            </Text>
+          </Pressable>
+        </View>
+      </View>
+
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Nearby Devices</Text>
         <FlatList
@@ -554,8 +804,17 @@ export default function App() {
               style={styles.deviceRow}
               onPress={() => connectToDevice(item)}
             >
-              <View>
-                <Text style={styles.deviceName}>{item.name}</Text>
+              <View style={styles.deviceInfo}>
+                <View style={styles.deviceNameRow}>
+                  <Text style={styles.deviceName}>{item.name}</Text>
+                  {item.isTarget && (
+                    <Text style={styles.deviceTag}>TARGET</Text>
+                  )}
+                </View>
+                <Text style={styles.deviceMeta}>
+                  RSSI: {item.rssi ?? 'n/a'} | Services:{' '}
+                  {formatServiceUuids(item.serviceUUIDs)}
+                </Text>
                 <Text style={styles.deviceId}>{item.id}</Text>
               </View>
               <Text style={styles.deviceAction}>Connect</Text>
@@ -564,7 +823,9 @@ export default function App() {
           ListEmptyComponent={
             <Text style={styles.emptyText}>
               {scanning
-                ? 'Searching for MorseKey devices...'
+                ? scanFilter === SCAN_FILTERS.SERVICE
+                  ? 'Searching for MorseKey devices (NUS)...'
+                  : 'Searching for nearby BLE devices...'
                 : 'No devices found yet.'}
             </Text>
           }
@@ -628,6 +889,12 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
   modeSelector: {
+    backgroundColor: '#1a1f2b',
+    padding: 12,
+    borderRadius: 10,
+    marginBottom: 12,
+  },
+  scanSelector: {
     backgroundColor: '#1a1f2b',
     padding: 12,
     borderRadius: 10,
@@ -700,11 +967,30 @@ const styles = StyleSheet.create({
     borderBottomColor: '#1f2937',
     flexDirection: 'row',
     justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
+  deviceInfo: {
+    flex: 1,
+    paddingRight: 10,
+  },
+  deviceNameRow: {
+    flexDirection: 'row',
     alignItems: 'center',
+    gap: 6,
   },
   deviceName: {
     color: '#e2e8f0',
     fontSize: 14,
+  },
+  deviceTag: {
+    color: '#38bdf8',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  deviceMeta: {
+    color: '#94a3b8',
+    fontSize: 11,
+    marginTop: 2,
   },
   deviceId: {
     color: '#64748b',

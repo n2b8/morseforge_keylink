@@ -15,19 +15,22 @@ except ImportError:
 # ----------------------------
 # CONFIG (LOCKED TO YOUR WORKING PINS)
 # ----------------------------
-DIT_PIN = board.IO14   # TRRS RIGHT (row 26)
-DAH_PIN = board.A3     # TRRS LEFT  (row 29) - this is what your board resolved to
+DAH_PIN = board.IO14   # TRRS RIGHT (row 26)
+DIT_PIN = board.A3     # TRRS LEFT  (row 29) - this is what your board resolved to
 DEBOUNCE_S = 0.010     # 10ms debounce
 
 # ----------------------------
 # Optional onboard NeoPixel (no neopixel module needed)
 # ----------------------------
+PIXEL_ENABLED = True
 PIXEL_PIN = getattr(board, "NEOPIXEL", None)
 _pixel_io = None
 _pixel_ok = False
 
 def pixel_init():
     global _pixel_io, _pixel_ok
+    if not PIXEL_ENABLED:
+        return
     if PIXEL_PIN is None:
         return
     try:
@@ -40,7 +43,7 @@ def pixel_init():
 
 def pixel_set(r: int, g: int, b: int):
     """Set pixel color. Most NeoPixels are GRB order."""
-    if not _pixel_ok:
+    if not _pixel_ok or not PIXEL_ENABLED:
         return
     import neopixel_write  # type: ignore
     r = max(0, min(255, r))
@@ -78,11 +81,33 @@ pixel_set(0, 0, 12)  # dim blue idle (if pixel is available)
 # ----------------------------
 ble = None
 uart = None
+advertisement = None
 if BLE_AVAILABLE:
     ble = BLERadio()
     ble.name = "MorseKey"
     uart = UARTService()
     advertisement = ProvideServicesAdvertisement(uart)
+    # Keep the device name in the primary advertisement for iOS discovery.
+    advertisement.complete_name = ble.name
+    print(f"Advertisement services: {advertisement.services}")
+
+last_connected = False
+last_uart_error = 0.0
+
+def ble_is_connected() -> bool:
+    return bool(BLE_AVAILABLE and ble and ble.connected)
+
+def safe_uart_write(event_text: str) -> None:
+    global last_uart_error
+    if not ble_is_connected():
+        return
+    try:
+        uart.write((event_text + "\n").encode("utf-8"))
+    except Exception as exc:
+        now = time.monotonic()
+        if (now - last_uart_error) > 2.0:
+            print("UART write failed:", repr(exc))
+            last_uart_error = now
 
 print("=== MorseForge TRRS + BLE (ESP32-C6) ===")
 print("DIT pin:", DIT_PIN)
@@ -105,15 +130,18 @@ while True:
 
     # Check for BLE connection changes
     if BLE_AVAILABLE and ble:
-        if not ble.connected:
-            if not ble.advertising:
-                print("Restarting BLE advertising...")
-                ble.start_advertising(advertisement)
-                pixel_set(0, 0, 12)  # idle blue
-        else:
-            # Connected - show purple
-            if ble.advertising:
+        connected_now = ble.connected
+        if connected_now != last_connected:
+            last_connected = connected_now
+            if connected_now:
+                print("BLE connected.")
                 pixel_set(12, 0, 12)  # purple = connected
+            else:
+                print("BLE disconnected.")
+                if not ble.advertising:
+                    print("Restarting BLE advertising...")
+                    ble.start_advertising(advertisement)
+                pixel_set(0, 0, 12)  # idle blue
 
     # DIT edge detect with debounce
     cur_dit = dit.value
@@ -126,8 +154,7 @@ while True:
             event = "K1:1"  # Key 1 (dit/left paddle) pressed
             print(f"{ms()} DIT_DOWN")
             pixel_set(0, 20, 0)   # green
-            if BLE_AVAILABLE and ble and ble.connected:
-                uart.write((event + "\n").encode('utf-8'))
+            safe_uart_write(event)
         else:
             # Key released
             event = "K1:0"  # Key 1 (dit/left paddle) released
@@ -136,8 +163,7 @@ while True:
                 pixel_set(12, 0, 12)
             else:
                 pixel_set(0, 0, 12)
-            if BLE_AVAILABLE and ble and ble.connected:
-                uart.write((event + "\n").encode('utf-8'))
+            safe_uart_write(event)
 
     # DAH edge detect with debounce
     cur_dah = dah.value
@@ -150,8 +176,7 @@ while True:
             event = "K2:1"  # Key 2 (dah/right paddle) pressed
             print(f"{ms()} DAH_DOWN")
             pixel_set(0, 0, 20)   # blue brighter
-            if BLE_AVAILABLE and ble and ble.connected:
-                uart.write((event + "\n").encode('utf-8'))
+            safe_uart_write(event)
         else:
             # Key released
             event = "K2:0"  # Key 2 (dah/right paddle) released
@@ -160,7 +185,6 @@ while True:
                 pixel_set(12, 0, 12)
             else:
                 pixel_set(0, 0, 12)
-            if BLE_AVAILABLE and ble and ble.connected:
-                uart.write((event + "\n").encode('utf-8'))
+            safe_uart_write(event)
 
     time.sleep(0.001)

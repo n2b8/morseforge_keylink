@@ -53,10 +53,8 @@
         }
       ],
       [
-        "react-native-ble-plx",
+        "react-native-ble-manager",
         {
-          "isBackgroundEnabled": false,
-          "modes": [],
           "bluetoothAlwaysPermission": "This app needs Bluetooth to connect to your Morse key device."
         }
       ]
