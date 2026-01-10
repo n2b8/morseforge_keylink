@@ -29,6 +29,10 @@ const SCAN_FILTERS = {
 const DIT_MS = 60;
 const DAH_MS = 180;
 const MAX_LOG_ITEMS = 60;
+const IAMBIC_GAP_MS = DIT_MS;
+const TONE_VOLUME = 1.0;
+const TONE_FADE_MS = 12;
+const TONE_FADE_STEPS = 6;
 
 const normalizeRssi = (rssi) =>
   typeof rssi === 'number' ? rssi : -999;
@@ -67,6 +71,22 @@ const withTimeout = (promise, timeoutMs, label) =>
         reject(error);
       });
   });
+
+const nextElementForRequest = (lastElement, ditRequested, dahRequested) => {
+  if (ditRequested && dahRequested) {
+    if (!lastElement) {
+      return 'dit';
+    }
+    return lastElement === 'dit' ? 'dah' : 'dit';
+  }
+  if (ditRequested) {
+    return 'dit';
+  }
+  if (dahRequested) {
+    return 'dah';
+  }
+  return null;
+};
 
 const formatBleState = (state) => {
   switch (state) {
@@ -159,110 +179,183 @@ const parseEvent = (value) => {
   return {type: 'RAW', payload: text};
 };
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const useTonePlayer = () => {
   const soundRef = useRef(null);
-  const timeoutRef = useRef(null);
+  const readyRef = useRef(false);
+  const volumeRef = useRef(0);
+  const fadeQueueRef = useRef(Promise.resolve());
+  const playbackRef = useRef(false);
+  const initTokenRef = useRef(0);
   const [ready, setReady] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [status, setStatus] = useState('idle');
+  const [errorMessage, setErrorMessage] = useState(null);
+
+  const teardownAudio = useCallback(async () => {
+    const sound = soundRef.current;
+    soundRef.current = null;
+    readyRef.current = false;
+    playbackRef.current = false;
+    volumeRef.current = 0;
+    fadeQueueRef.current = Promise.resolve();
+    setIsPlaying(false);
+    setReady(false);
+    if (sound) {
+      try {
+        await sound.stopAsync();
+      } catch (error) {
+        // Ignore
+      }
+      try {
+        await sound.unloadAsync();
+      } catch (error) {
+        // Ignore
+      }
+    }
+  }, []);
+
+  const initAudio = useCallback(async () => {
+    const token = initTokenRef.current + 1;
+    initTokenRef.current = token;
+    setStatus('configuring');
+    setErrorMessage(null);
+    await teardownAudio();
+    try {
+      await Audio.setIsEnabledAsync(true);
+      const interruptionModeIOS =
+        Audio.InterruptionModeIOS?.DoNotMix ?? 1;
+      const interruptionModeAndroid =
+        Audio.InterruptionModeAndroid?.DoNotMix ?? 1;
+      await Audio.setAudioModeAsync({
+        playsInSilentModeIOS: true,
+        allowsRecordingIOS: false,
+        staysActiveInBackground: false,
+        interruptionModeIOS,
+        interruptionModeAndroid,
+        shouldDuckAndroid: true,
+      });
+
+      setStatus('loading-tone');
+      const {sound} = await Audio.Sound.createAsync(
+        require('./assets/tone.wav'),
+        {shouldPlay: true, isLooping: true, volume: 0}
+      );
+      if (token !== initTokenRef.current) {
+        try {
+          await sound.unloadAsync();
+        } catch (error) {
+          // Ignore
+        }
+        return;
+      }
+      soundRef.current = sound;
+      readyRef.current = true;
+      setReady(true);
+      setStatus('ready');
+    } catch (error) {
+      const message = error?.message ? error.message : String(error);
+      console.error('Failed to initialize audio:', error);
+      setStatus('error');
+      setErrorMessage(message);
+      setReady(false);
+    }
+  }, []);
 
   useEffect(() => {
-    const initAudio = async () => {
-      try {
-        await Audio.setAudioModeAsync({
-          playsInSilentModeIOS: true,
-          staysActiveInBackground: false,
-        });
-
-        // Generate a simple tone programmatically (440Hz sine wave)
-        const {sound} = await Audio.Sound.createAsync(
-          require('./assets/tone.wav'),
-          {shouldPlay: false, isLooping: false}
-        );
-        soundRef.current = sound;
-        setReady(true);
-      } catch (error) {
-        console.error('Failed to initialize audio:', error);
-        setReady(false);
-      }
-    };
-
     initAudio();
 
     return () => {
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
-      }
-      if (soundRef.current) {
-        soundRef.current.unloadAsync();
-      }
+      teardownAudio();
     };
-  }, []);
+  }, [initAudio, teardownAudio]);
 
-  const stop = useCallback(async () => {
+  const ensurePlayback = useCallback(async () => {
     const sound = soundRef.current;
-    if (!sound) {
+    if (!sound || !readyRef.current) {
       return;
     }
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
-    }
     try {
-      await sound.stopAsync();
-      setIsPlaying(false);
+      if (!playbackRef.current) {
+        await sound.setIsLoopingAsync(true);
+        await sound.playAsync();
+        playbackRef.current = true;
+      }
     } catch (error) {
       // Ignore
     }
   }, []);
 
-  const playContinuous = useCallback(async () => {
-    const sound = soundRef.current;
-    if (!sound || !ready) {
-      return;
-    }
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
-    }
-    try {
-      await sound.stopAsync();
-      await sound.setPositionAsync(0);
-      await sound.setIsLoopingAsync(true);
-      await sound.playAsync();
-      setIsPlaying(true);
-    } catch (error) {
-      setIsPlaying(false);
-    }
-  }, [ready]);
-
-  const playOneShot = useCallback(
-    async (durationMs) => {
+  const rampVolume = useCallback(
+    async (targetVolume, durationMs) => {
       const sound = soundRef.current;
-      if (!sound || !ready) {
+      if (!sound || !readyRef.current) {
         return;
       }
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
-      }
-      try {
-        await sound.stopAsync();
-        await sound.setPositionAsync(0);
-        await sound.setIsLoopingAsync(false);
-        await sound.playAsync();
-        setIsPlaying(true);
-        timeoutRef.current = setTimeout(async () => {
-          await sound.stopAsync();
-          setIsPlaying(false);
-          timeoutRef.current = null;
-        }, durationMs);
-      } catch (error) {
-        setIsPlaying(false);
+      const startVolume = volumeRef.current;
+      const steps = Math.max(1, TONE_FADE_STEPS);
+      const stepMs = durationMs / steps;
+      for (let i = 1; i <= steps; i += 1) {
+        const nextVolume =
+          startVolume + ((targetVolume - startVolume) * i) / steps;
+        try {
+          await sound.setVolumeAsync(nextVolume);
+          volumeRef.current = nextVolume;
+        } catch (error) {
+          break;
+        }
+        await sleep(stepMs);
       }
     },
-    [ready]
+    []
   );
 
-  return {ready, isPlaying, playContinuous, playOneShot, stop};
+  const gateOn = useCallback(async () => {
+    if (!readyRef.current) {
+      return;
+    }
+    await ensurePlayback();
+    fadeQueueRef.current = fadeQueueRef.current
+      .then(() => rampVolume(TONE_VOLUME, TONE_FADE_MS))
+      .catch(() => rampVolume(TONE_VOLUME, TONE_FADE_MS));
+    setIsPlaying(true);
+  }, [ensurePlayback, rampVolume]);
+
+  const gateOff = useCallback(async () => {
+    if (!readyRef.current) {
+      return;
+    }
+    fadeQueueRef.current = fadeQueueRef.current
+      .then(() => rampVolume(0, TONE_FADE_MS))
+      .catch(() => rampVolume(0, TONE_FADE_MS));
+    setIsPlaying(false);
+  }, [rampVolume]);
+
+  const stop = useCallback(async () => {
+    await gateOff();
+  }, [gateOff]);
+
+  const playElement = useCallback(
+    async (durationMs) => {
+      await gateOn();
+      await sleep(durationMs);
+      await gateOff();
+    },
+    [gateOn, gateOff]
+  );
+
+  return {
+    ready,
+    isPlaying,
+    gateOn,
+    gateOff,
+    playElement,
+    stop,
+    status,
+    errorMessage,
+    retry: initAudio,
+  };
 };
 
 export default function App() {
@@ -271,18 +364,33 @@ export default function App() {
   const scanFilterRef = useRef(SCAN_FILTERS.SERVICE);
   const connectedDeviceRef = useRef(null);
   const handleEventRef = useRef(null);
+  const keyStateRef = useRef({key1: false, key2: false});
+  const keyerRef = useRef({
+    running: false,
+    token: 0,
+    lastElement: null,
+    ditMemory: false,
+    dahMemory: false,
+  });
   const [devices, setDevices] = useState([]);
   const [scanning, setScanning] = useState(false);
   const [scanFilter, setScanFilter] = useState(SCAN_FILTERS.SERVICE);
   const [connectedDevice, setConnectedDevice] = useState(null);
   const [logs, setLogs] = useState([]);
   const [keyerMode, setKeyerMode] = useState(KEYER_MODES.STRAIGHT);
-  const [key1Pressed, setKey1Pressed] = useState(false);
-  const [key2Pressed, setKey2Pressed] = useState(false);
+  const keyerModeRef = useRef(keyerMode);
   const [bleState, setBleState] = useState('unknown');
-  const iambicStateRef = useRef({lastKey: null, needsAlternate: false});
-  const {ready: toneReady, isPlaying, playContinuous, playOneShot, stop} =
-    useTonePlayer();
+  const {
+    ready: toneReady,
+    isPlaying,
+    gateOn,
+    gateOff,
+    playElement,
+    stop,
+    status: audioStatus,
+    errorMessage: audioError,
+    retry: retryAudio,
+  } = useTonePlayer();
 
   const addLog = useCallback((message) => {
     const timestamp = new Date().toLocaleTimeString();
@@ -439,62 +547,108 @@ export default function App() {
     [addLog]
   );
 
+  const resetKeyer = useCallback(
+    async (stopTone = true) => {
+      keyerRef.current.running = false;
+      keyerRef.current.token += 1;
+      keyerRef.current.lastElement = null;
+      keyerRef.current.ditMemory = false;
+      keyerRef.current.dahMemory = false;
+      if (stopTone) {
+        await gateOff();
+      }
+    },
+    [gateOff]
+  );
+
+  const startIambicLoop = useCallback(async () => {
+    if (keyerRef.current.running) {
+      return;
+    }
+    keyerRef.current.running = true;
+    keyerRef.current.token += 1;
+    const token = keyerRef.current.token;
+
+    while (keyerRef.current.running && token === keyerRef.current.token) {
+      const key1 = keyStateRef.current.key1;
+      const key2 = keyStateRef.current.key2;
+      const ditRequested = key1 || keyerRef.current.ditMemory;
+      const dahRequested = key2 || keyerRef.current.dahMemory;
+      const nextElement = nextElementForRequest(
+        keyerRef.current.lastElement,
+        ditRequested,
+        dahRequested
+      );
+
+      if (!nextElement) {
+        keyerRef.current.running = false;
+        await gateOff();
+        break;
+      }
+
+      if (nextElement === 'dit') {
+        keyerRef.current.ditMemory = false;
+      } else {
+        keyerRef.current.dahMemory = false;
+      }
+      keyerRef.current.lastElement = nextElement;
+
+      await playElement(nextElement === 'dit' ? DIT_MS : DAH_MS);
+      if (token !== keyerRef.current.token) {
+        break;
+      }
+
+      const key1After = keyStateRef.current.key1;
+      const key2After = keyStateRef.current.key2;
+      if (
+        !key1After &&
+        !key2After &&
+        keyerModeRef.current === KEYER_MODES.IAMBIC_A
+      ) {
+        keyerRef.current.ditMemory = false;
+        keyerRef.current.dahMemory = false;
+      }
+
+      await sleep(IAMBIC_GAP_MS);
+    }
+  }, [gateOff, playElement]);
+
   const handleEvent = useCallback(
     (event) => {
-      if (!event) {
+      if (!event || event.type !== 'KEY_STATE') {
         return;
       }
 
-      if (event.type === 'KEY_STATE') {
-        const {key, pressed} = event;
-
-        // Update key state
-        if (key === 1) {
-          setKey1Pressed(pressed);
-        } else if (key === 2) {
-          setKey2Pressed(pressed);
+      const {key, pressed} = event;
+      if (key === 1) {
+        keyStateRef.current.key1 = pressed;
+        if (pressed) {
+          keyerRef.current.ditMemory = true;
         }
-
-        // Handle based on keyer mode
-        if (keyerMode === KEYER_MODES.STRAIGHT) {
-          // Straight key mode: either key acts as a straight key
-          if (pressed) {
-            playContinuous();
-          } else {
-            // Only stop if both keys are released
-            if (key === 1 && !key2Pressed) {
-              stop();
-            } else if (key === 2 && !key1Pressed) {
-              stop();
-            }
-          }
-        } else if (keyerMode === KEYER_MODES.IAMBIC_A || keyerMode === KEYER_MODES.IAMBIC_B) {
-          // Iambic mode: K1 = dit, K2 = dah
-          if (pressed) {
-            if (key === 1) {
-              // Dit paddle pressed
-              playOneShot(DIT_MS);
-              iambicStateRef.current.lastKey = 1;
-            } else {
-              // Dah paddle pressed
-              playOneShot(DAH_MS);
-              iambicStateRef.current.lastKey = 2;
-            }
-          } else {
-            // Key released
-            // In iambic mode, check if other paddle is still pressed
-            if (key === 1 && key2Pressed) {
-              // Dit released, dah still pressed - play dah
-              playOneShot(DAH_MS);
-            } else if (key === 2 && key1Pressed) {
-              // Dah released, dit still pressed - play dit
-              playOneShot(DIT_MS);
-            }
-          }
+      } else if (key === 2) {
+        keyStateRef.current.key2 = pressed;
+        if (pressed) {
+          keyerRef.current.dahMemory = true;
         }
       }
+
+      if (keyerModeRef.current === KEYER_MODES.STRAIGHT) {
+        if (keyStateRef.current.key1 || keyStateRef.current.key2) {
+          gateOn();
+        } else {
+          gateOff();
+        }
+        return;
+      }
+
+      if (
+        keyerModeRef.current === KEYER_MODES.IAMBIC_A ||
+        keyerModeRef.current === KEYER_MODES.IAMBIC_B
+      ) {
+        startIambicLoop();
+      }
     },
-    [keyerMode, key1Pressed, key2Pressed, playContinuous, playOneShot, stop]
+    [gateOff, gateOn, startIambicLoop]
   );
 
   useEffect(() => {
@@ -508,6 +662,23 @@ export default function App() {
   useEffect(() => {
     handleEventRef.current = handleEvent;
   }, [handleEvent]);
+
+  useEffect(() => {
+    keyerModeRef.current = keyerMode;
+    if (keyerMode === KEYER_MODES.STRAIGHT) {
+      resetKeyer(false);
+      if (keyStateRef.current.key1 || keyStateRef.current.key2) {
+        gateOn();
+      } else {
+        gateOff();
+      }
+    } else {
+      resetKeyer(true);
+      if (keyStateRef.current.key1 || keyStateRef.current.key2) {
+        startIambicLoop();
+      }
+    }
+  }, [gateOff, gateOn, keyerMode, resetKeyer, startIambicLoop]);
 
   const connectToDevice = useCallback(
     async (device) => {
@@ -557,10 +728,12 @@ export default function App() {
       addLog(`Disconnect error: ${error.message || error}`);
     }
 
+    keyStateRef.current = {key1: false, key2: false};
+    resetKeyer();
     stop();
     setConnectedDevice(null);
     addLog('Disconnected.');
-  }, [addLog, connectedDevice, stop]);
+  }, [addLog, connectedDevice, resetKeyer, stop]);
 
   useEffect(() => {
     BleManager.start({showAlert: false}).catch((error) => {
@@ -617,6 +790,8 @@ export default function App() {
         const current = connectedDeviceRef.current;
         if (current && current.id === peripheral) {
           addLog('Disconnected.');
+          keyStateRef.current = {key1: false, key2: false};
+          resetKeyer();
           stop();
           setConnectedDevice(null);
         }
@@ -630,7 +805,7 @@ export default function App() {
     return () => {
       subscriptions.forEach((subscription) => subscription.remove());
     };
-  }, [addLog, handleDiscoverPeripheral, stop]);
+  }, [addLog, handleDiscoverPeripheral, resetKeyer, stop]);
 
   return (
     <SafeAreaView style={styles.container}>
@@ -661,8 +836,19 @@ export default function App() {
         <View style={styles.statusBlock}>
           <Text style={styles.label}>Audio</Text>
           <Text style={styles.value}>
-            {toneReady ? (isPlaying ? 'Playing' : 'Ready') : 'Loading...'}
+            {toneReady
+              ? isPlaying
+                ? 'Playing'
+                : 'Ready'
+              : audioError
+              ? 'Error'
+              : `Loading... (${audioStatus})`}
           </Text>
+          {audioError && (
+            <Text style={styles.errorText} numberOfLines={2}>
+              {audioError}
+            </Text>
+          )}
         </View>
       </View>
 
@@ -748,6 +934,12 @@ export default function App() {
           disabled={!connectedDevice}
         >
           <Text style={styles.buttonText}>Disconnect</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.button, styles.retryButton]}
+          onPress={retryAudio}
+        >
+          <Text style={styles.buttonText}>Retry Audio</Text>
         </Pressable>
       </View>
 
@@ -879,6 +1071,11 @@ const styles = StyleSheet.create({
     padding: 12,
     borderRadius: 10,
   },
+  errorText: {
+    color: '#fca5a5',
+    fontSize: 11,
+    marginTop: 6,
+  },
   label: {
     color: '#94a3b8',
     fontSize: 12,
@@ -940,6 +1137,9 @@ const styles = StyleSheet.create({
   },
   disconnectButton: {
     backgroundColor: '#ef4444',
+  },
+  retryButton: {
+    backgroundColor: '#0f766e',
   },
   buttonDisabled: {
     opacity: 0.5,
