@@ -1,6 +1,9 @@
 import time
 import board
 import digitalio
+from adafruit_ble import BLERadio
+from adafruit_ble.advertising.standard import ProvideServicesAdvertisement
+from adafruit_ble.services.nordic import UARTService
 
 # ----------------------------
 # CONFIG (LOCKED TO YOUR WORKING PINS)
@@ -63,10 +66,21 @@ last_change_dah = time.monotonic()
 pixel_init()
 pixel_set(0, 0, 12)  # dim blue idle (if pixel is available)
 
-print("=== MorseForge TRRS test (ESP32-C6) ===")
+# ----------------------------
+# BLE Setup
+# ----------------------------
+ble = BLERadio()
+ble.name = "MorseKey"
+uart = UARTService()
+advertisement = ProvideServicesAdvertisement(uart)
+
+print("=== MorseForge TRRS + BLE (ESP32-C6) ===")
 print("DIT pin:", DIT_PIN)
 print("DAH pin:", DAH_PIN)
 print("Debounce:", int(DEBOUNCE_S * 1000), "ms")
+print("BLE Name:", ble.name)
+print("Starting BLE advertising...")
+ble.start_advertising(advertisement)
 print("Ready. Press paddles/key...")
 
 # ----------------------------
@@ -75,6 +89,17 @@ print("Ready. Press paddles/key...")
 while True:
     now = time.monotonic()
 
+    # Check for BLE connection changes
+    if not ble.connected:
+        if not ble.advertising:
+            print("Restarting BLE advertising...")
+            ble.start_advertising(advertisement)
+            pixel_set(0, 0, 12)  # idle blue
+    else:
+        # Connected - show purple
+        if ble.advertising:
+            pixel_set(12, 0, 12)  # purple = connected
+
     # DIT edge detect with debounce
     cur_dit = dit.value
     if cur_dit != last_dit and (now - last_change_dit) >= DEBOUNCE_S:
@@ -82,11 +107,17 @@ while True:
         last_dit = cur_dit
 
         if not cur_dit:
-            print(f"{ms()} DIT_DOWN")
+            event = "DIT_DOWN"
+            print(f"{ms()} {event}")
             pixel_set(0, 20, 0)   # green
+            if ble.connected:
+                uart.write((event + "\n").encode('utf-8'))
         else:
-            print(f"{ms()} DIT_UP")
-            pixel_set(0, 0, 12)   # back to idle blue
+            event = "DIT_UP"
+            print(f"{ms()} {event}")
+            pixel_set(0, 0, 12) if not ble.connected else pixel_set(12, 0, 12)
+            if ble.connected:
+                uart.write((event + "\n").encode('utf-8'))
 
     # DAH edge detect with debounce
     cur_dah = dah.value
@@ -95,10 +126,16 @@ while True:
         last_dah = cur_dah
 
         if not cur_dah:
-            print(f"{ms()} DAH_DOWN")
+            event = "DAH_DOWN"
+            print(f"{ms()} {event}")
             pixel_set(0, 0, 20)   # blue brighter
+            if ble.connected:
+                uart.write((event + "\n").encode('utf-8'))
         else:
-            print(f"{ms()} DAH_UP")
-            pixel_set(0, 0, 12)   # idle blue
+            event = "DAH_UP"
+            print(f"{ms()} {event}")
+            pixel_set(0, 0, 12) if not ble.connected else pixel_set(12, 0, 12)
+            if ble.connected:
+                uart.write((event + "\n").encode('utf-8'))
 
     time.sleep(0.001)
