@@ -1,9 +1,16 @@
 import time
 import board
 import digitalio
-from adafruit_ble import BLERadio
-from adafruit_ble.advertising.standard import ProvideServicesAdvertisement
-from adafruit_ble.services.nordic import UARTService
+
+# BLE imports - these are built into CircuitPython for ESP32
+try:
+    from adafruit_ble import BLERadio
+    from adafruit_ble.advertising.standard import ProvideServicesAdvertisement
+    from adafruit_ble.services.nordic import UARTService
+    BLE_AVAILABLE = True
+except ImportError:
+    BLE_AVAILABLE = False
+    print("WARNING: BLE libraries not found. Install adafruit_ble library bundle.")
 
 # ----------------------------
 # CONFIG (LOCKED TO YOUR WORKING PINS)
@@ -69,19 +76,26 @@ pixel_set(0, 0, 12)  # dim blue idle (if pixel is available)
 # ----------------------------
 # BLE Setup
 # ----------------------------
-ble = BLERadio()
-ble.name = "MorseKey"
-uart = UARTService()
-advertisement = ProvideServicesAdvertisement(uart)
+ble = None
+uart = None
+if BLE_AVAILABLE:
+    ble = BLERadio()
+    ble.name = "MorseKey"
+    uart = UARTService()
+    advertisement = ProvideServicesAdvertisement(uart)
 
 print("=== MorseForge TRRS + BLE (ESP32-C6) ===")
 print("DIT pin:", DIT_PIN)
 print("DAH pin:", DAH_PIN)
 print("Debounce:", int(DEBOUNCE_S * 1000), "ms")
-print("BLE Name:", ble.name)
-print("Starting BLE advertising...")
-ble.start_advertising(advertisement)
-print("Ready. Press paddles/key...")
+if BLE_AVAILABLE:
+    print("BLE Name:", ble.name)
+    print("Starting BLE advertising...")
+    ble.start_advertising(advertisement)
+    print("Ready. Press paddles/key...")
+else:
+    print("BLE not available - running in serial-only mode")
+    print("Ready. Press paddles/key...")
 
 # ----------------------------
 # Main loop
@@ -90,15 +104,16 @@ while True:
     now = time.monotonic()
 
     # Check for BLE connection changes
-    if not ble.connected:
-        if not ble.advertising:
-            print("Restarting BLE advertising...")
-            ble.start_advertising(advertisement)
-            pixel_set(0, 0, 12)  # idle blue
-    else:
-        # Connected - show purple
-        if ble.advertising:
-            pixel_set(12, 0, 12)  # purple = connected
+    if BLE_AVAILABLE and ble:
+        if not ble.connected:
+            if not ble.advertising:
+                print("Restarting BLE advertising...")
+                ble.start_advertising(advertisement)
+                pixel_set(0, 0, 12)  # idle blue
+        else:
+            # Connected - show purple
+            if ble.advertising:
+                pixel_set(12, 0, 12)  # purple = connected
 
     # DIT edge detect with debounce
     cur_dit = dit.value
@@ -110,13 +125,16 @@ while True:
             event = "DIT_DOWN"
             print(f"{ms()} {event}")
             pixel_set(0, 20, 0)   # green
-            if ble.connected:
+            if BLE_AVAILABLE and ble and ble.connected:
                 uart.write((event + "\n").encode('utf-8'))
         else:
             event = "DIT_UP"
             print(f"{ms()} {event}")
-            pixel_set(0, 0, 12) if not ble.connected else pixel_set(12, 0, 12)
-            if ble.connected:
+            if BLE_AVAILABLE and ble and ble.connected:
+                pixel_set(12, 0, 12)
+            else:
+                pixel_set(0, 0, 12)
+            if BLE_AVAILABLE and ble and ble.connected:
                 uart.write((event + "\n").encode('utf-8'))
 
     # DAH edge detect with debounce
@@ -129,13 +147,16 @@ while True:
             event = "DAH_DOWN"
             print(f"{ms()} {event}")
             pixel_set(0, 0, 20)   # blue brighter
-            if ble.connected:
+            if BLE_AVAILABLE and ble and ble.connected:
                 uart.write((event + "\n").encode('utf-8'))
         else:
             event = "DAH_UP"
             print(f"{ms()} {event}")
-            pixel_set(0, 0, 12) if not ble.connected else pixel_set(12, 0, 12)
-            if ble.connected:
+            if BLE_AVAILABLE and ble and ble.connected:
+                pixel_set(12, 0, 12)
+            else:
+                pixel_set(0, 0, 12)
+            if BLE_AVAILABLE and ble and ble.connected:
                 uart.write((event + "\n").encode('utf-8'))
 
     time.sleep(0.001)
