@@ -16,7 +16,7 @@
     "expo-status-bar": "~3.0.9",
     "react": "19.1.0",
     "react-native": "0.81.5",
-    "react-native-ble-plx": "^3.5.0"
+    "react-native-ble-plx": "^3.1.2"
   },
   "private": true
 }

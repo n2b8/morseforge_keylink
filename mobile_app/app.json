@@ -51,6 +51,14 @@
             "targetSdkVersion": 34
           }
         }
+      ],
+      [
+        "react-native-ble-plx",
+        {
+          "isBackgroundEnabled": false,
+          "modes": [],
+          "bluetoothAlwaysPermission": "This app needs Bluetooth to connect to your Morse key device."
+        }
       ]
     ]
   }
