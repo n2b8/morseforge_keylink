@@ -122,14 +122,16 @@ while True:
         last_dit = cur_dit
 
         if not cur_dit:
-            event = "DIT_DOWN"
-            print(f"{ms()} {event}")
+            # Key pressed (active low)
+            event = "K1:1"  # Key 1 (dit/left paddle) pressed
+            print(f"{ms()} DIT_DOWN")
             pixel_set(0, 20, 0)   # green
             if BLE_AVAILABLE and ble and ble.connected:
                 uart.write((event + "\n").encode('utf-8'))
         else:
-            event = "DIT_UP"
-            print(f"{ms()} {event}")
+            # Key released
+            event = "K1:0"  # Key 1 (dit/left paddle) released
+            print(f"{ms()} DIT_UP")
             if BLE_AVAILABLE and ble and ble.connected:
                 pixel_set(12, 0, 12)
             else:
@@ -144,14 +146,16 @@ while True:
         last_dah = cur_dah
 
         if not cur_dah:
-            event = "DAH_DOWN"
-            print(f"{ms()} {event}")
+            # Key pressed (active low)
+            event = "K2:1"  # Key 2 (dah/right paddle) pressed
+            print(f"{ms()} DAH_DOWN")
             pixel_set(0, 0, 20)   # blue brighter
             if BLE_AVAILABLE and ble and ble.connected:
                 uart.write((event + "\n").encode('utf-8'))
         else:
-            event = "DAH_UP"
-            print(f"{ms()} {event}")
+            # Key released
+            event = "K2:0"  # Key 2 (dah/right paddle) released
+            print(f"{ms()} DAH_UP")
             if BLE_AVAILABLE and ble and ble.connected:
                 pixel_set(12, 0, 12)
             else:

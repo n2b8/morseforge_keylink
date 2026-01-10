@@ -25,6 +25,13 @@ const DIT_MS = 60;
 const DAH_MS = 180;
 const MAX_LOG_ITEMS = 60;
 
+// Keyer modes
+const KEYER_MODES = {
+  STRAIGHT: 'straight',
+  IAMBIC_A: 'iambic_a',
+  IAMBIC_B: 'iambic_b',
+};
+
 const parseEvent = (base64Value) => {
   if (!base64Value) {
     return null;
@@ -41,28 +48,38 @@ const parseEvent = (base64Value) => {
     return null;
   }
 
-  const text = data.toString('utf8').trim().toUpperCase();
+  const text = data.toString('utf8').trim();
   if (!text) {
     return null;
   }
 
-  if (text.includes('DIT') && text.includes('DOWN')) {
-    return {type: 'DIT_DOWN'};
+  // Parse new universal format: K1:1, K1:0, K2:1, K2:0
+  // K1 = dit/left paddle, K2 = dah/right paddle
+  // 1 = pressed, 0 = released
+  const match = text.match(/^K([12]):([01])$/);
+  if (match) {
+    const key = parseInt(match[1]);
+    const pressed = match[2] === '1';
+    return {
+      type: 'KEY_STATE',
+      key: key,  // 1 or 2
+      pressed: pressed,  // true or false
+    };
   }
-  if (text.includes('DIT') && text.includes('UP')) {
-    return {type: 'DIT_UP'};
+
+  // Legacy format support (for backwards compatibility)
+  const upperText = text.toUpperCase();
+  if (upperText.includes('DIT') && upperText.includes('DOWN')) {
+    return {type: 'KEY_STATE', key: 1, pressed: true};
   }
-  if (text.includes('DAH') && text.includes('DOWN')) {
-    return {type: 'DAH_DOWN'};
+  if (upperText.includes('DIT') && upperText.includes('UP')) {
+    return {type: 'KEY_STATE', key: 1, pressed: false};
   }
-  if (text.includes('DAH') && text.includes('UP')) {
-    return {type: 'DAH_UP'};
+  if (upperText.includes('DAH') && upperText.includes('DOWN')) {
+    return {type: 'KEY_STATE', key: 2, pressed: true};
   }
-  if (text.includes('DIT')) {
-    return {type: 'DIT'};
-  }
-  if (text.includes('DAH')) {
-    return {type: 'DAH'};
+  if (upperText.includes('DAH') && upperText.includes('UP')) {
+    return {type: 'KEY_STATE', key: 2, pressed: false};
   }
 
   return {type: 'RAW', payload: text};
@@ -181,6 +198,10 @@ export default function App() {
   const [scanning, setScanning] = useState(false);
   const [connectedDevice, setConnectedDevice] = useState(null);
   const [logs, setLogs] = useState([]);
+  const [keyerMode, setKeyerMode] = useState(KEYER_MODES.STRAIGHT);
+  const [key1Pressed, setKey1Pressed] = useState(false);
+  const [key2Pressed, setKey2Pressed] = useState(false);
+  const iambicStateRef = useRef({lastKey: null, needsAlternate: false});
   const {ready: toneReady, isPlaying, playContinuous, playOneShot, stop} =
     useTonePlayer();
 
@@ -271,26 +292,56 @@ export default function App() {
         return;
       }
 
-      switch (event.type) {
-        case 'DIT_DOWN':
-        case 'DAH_DOWN':
-          playContinuous();
-          break;
-        case 'DIT_UP':
-        case 'DAH_UP':
-          stop();
-          break;
-        case 'DIT':
-          playOneShot(DIT_MS);
-          break;
-        case 'DAH':
-          playOneShot(DAH_MS);
-          break;
-        default:
-          break;
+      if (event.type === 'KEY_STATE') {
+        const {key, pressed} = event;
+
+        // Update key state
+        if (key === 1) {
+          setKey1Pressed(pressed);
+        } else if (key === 2) {
+          setKey2Pressed(pressed);
+        }
+
+        // Handle based on keyer mode
+        if (keyerMode === KEYER_MODES.STRAIGHT) {
+          // Straight key mode: either key acts as a straight key
+          if (pressed) {
+            playContinuous();
+          } else {
+            // Only stop if both keys are released
+            if (key === 1 && !key2Pressed) {
+              stop();
+            } else if (key === 2 && !key1Pressed) {
+              stop();
+            }
+          }
+        } else if (keyerMode === KEYER_MODES.IAMBIC_A || keyerMode === KEYER_MODES.IAMBIC_B) {
+          // Iambic mode: K1 = dit, K2 = dah
+          if (pressed) {
+            if (key === 1) {
+              // Dit paddle pressed
+              playOneShot(DIT_MS);
+              iambicStateRef.current.lastKey = 1;
+            } else {
+              // Dah paddle pressed
+              playOneShot(DAH_MS);
+              iambicStateRef.current.lastKey = 2;
+            }
+          } else {
+            // Key released
+            // In iambic mode, check if other paddle is still pressed
+            if (key === 1 && key2Pressed) {
+              // Dit released, dah still pressed - play dah
+              playOneShot(DAH_MS);
+            } else if (key === 2 && key1Pressed) {
+              // Dah released, dit still pressed - play dit
+              playOneShot(DIT_MS);
+            }
+          }
+        }
       }
     },
-    [playContinuous, playOneShot, stop]
+    [keyerMode, key1Pressed, key2Pressed, playContinuous, playOneShot, stop]
   );
 
   const connectToDevice = useCallback(
@@ -324,11 +375,13 @@ export default function App() {
 
             const event = parseEvent(characteristic.value);
             if (event) {
-              addLog(
-                event.type === 'RAW'
-                  ? `RX ${event.payload}`
-                  : `RX ${event.type}`
-              );
+              if (event.type === 'RAW') {
+                addLog(`RX ${event.payload}`);
+              } else if (event.type === 'KEY_STATE') {
+                const keyName = event.key === 1 ? 'K1' : 'K2';
+                const state = event.pressed ? 'DOWN' : 'UP';
+                addLog(`${keyName} ${state}`);
+              }
               handleEvent(event);
             }
           }
@@ -403,6 +456,63 @@ export default function App() {
           <Text style={styles.value}>
             {toneReady ? (isPlaying ? 'Playing' : 'Ready') : 'Loading...'}
           </Text>
+        </View>
+      </View>
+
+      <View style={styles.modeSelector}>
+        <Text style={styles.label}>Keyer Mode</Text>
+        <View style={styles.modeButtons}>
+          <Pressable
+            style={[
+              styles.modeButton,
+              keyerMode === KEYER_MODES.STRAIGHT && styles.modeButtonActive,
+            ]}
+            onPress={() => setKeyerMode(KEYER_MODES.STRAIGHT)}
+          >
+            <Text
+              style={[
+                styles.modeButtonText,
+                keyerMode === KEYER_MODES.STRAIGHT &&
+                  styles.modeButtonTextActive,
+              ]}
+            >
+              Straight
+            </Text>
+          </Pressable>
+          <Pressable
+            style={[
+              styles.modeButton,
+              keyerMode === KEYER_MODES.IAMBIC_A && styles.modeButtonActive,
+            ]}
+            onPress={() => setKeyerMode(KEYER_MODES.IAMBIC_A)}
+          >
+            <Text
+              style={[
+                styles.modeButtonText,
+                keyerMode === KEYER_MODES.IAMBIC_A &&
+                  styles.modeButtonTextActive,
+              ]}
+            >
+              Iambic A
+            </Text>
+          </Pressable>
+          <Pressable
+            style={[
+              styles.modeButton,
+              keyerMode === KEYER_MODES.IAMBIC_B && styles.modeButtonActive,
+            ]}
+            onPress={() => setKeyerMode(KEYER_MODES.IAMBIC_B)}
+          >
+            <Text
+              style={[
+                styles.modeButtonText,
+                keyerMode === KEYER_MODES.IAMBIC_B &&
+                  styles.modeButtonTextActive,
+              ]}
+            >
+              Iambic B
+            </Text>
+          </Pressable>
         </View>
       </View>
 
@@ -516,6 +626,38 @@ const styles = StyleSheet.create({
   value: {
     color: '#e2e8f0',
     fontSize: 13,
+  },
+  modeSelector: {
+    backgroundColor: '#1a1f2b',
+    padding: 12,
+    borderRadius: 10,
+    marginBottom: 12,
+  },
+  modeButtons: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  modeButton: {
+    flex: 1,
+    backgroundColor: '#111827',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#334155',
+    alignItems: 'center',
+  },
+  modeButtonActive: {
+    backgroundColor: '#2563eb',
+    borderColor: '#3b82f6',
+  },
+  modeButtonText: {
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  modeButtonTextActive: {
+    color: '#f8fafc',
   },
   controls: {
     flexDirection: 'row',

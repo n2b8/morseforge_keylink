@@ -48,13 +48,27 @@ Make sure your ESP32 is flashed with the firmware from `../software/code.py`. Th
 
 ## Configuration
 
-### BLE UUIDs
+### Keyer Modes
 
-The app uses the Nordic UART Service UUIDs:
-- Service: `6e400001-b5a3-f393-e0a9-e50e24dcca9e`
+The app supports three keyer modes:
+- **Straight Key**: Both paddles act as a simple straight key (continuous tone while pressed)
+- **Iambic A**: Automatic alternating dits and dahs with paddle squeeze
+- **Iambic B**: Enhanced iambic mode with improved squeeze behavior
+
+Switch modes using the mode selector buttons in the app.
+
+### BLE Protocol
+
+The firmware sends key state messages in the format: `K{key}:{state}`
+
+- `K1:1` - Key 1 (dit/left paddle) pressed
+- `K1:0` - Key 1 (dit/left paddle) released
+- `K2:1` - Key 2 (dah/right paddle) pressed
+- `K2:0` - Key 2 (dah/right paddle) released
+
+**BLE UUIDs:**
+- Service: `6e400001-b5a3-f393-e0a9-e50e24dcca9e` (Nordic UART Service)
 - TX Characteristic: `6e400003-b5a3-f393-e0a9-e50e24dcca9e`
-
-These match the UUIDs used by CircuitPython's `UARTService`.
 
 ### Tone Timing
 
