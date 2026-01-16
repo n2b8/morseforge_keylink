@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+
+# KiCad backups
+*.kicad_pcb-bak
+*.kicad_sch-bak
+*.kicad_pcb~
+*.kicad_sch~
+_autosave-*
+fp-info-cache
+
+# Temporary files
+*.bak
+*.tmp
+*.swp
+
