@@ -2,7 +2,7 @@ import time
 import board
 import digitalio
 
-# BLE imports - these are built into CircuitPython for ESP32
+# BLE imports - requires adafruit_ble from the CircuitPython bundle
 try:
     from adafruit_ble import BLERadio
     from adafruit_ble.advertising.standard import ProvideServicesAdvertisement
@@ -13,10 +13,12 @@ except ImportError:
     print("WARNING: BLE libraries not found. Install adafruit_ble library bundle.")
 
 # ----------------------------
-# CONFIG (LOCKED TO YOUR WORKING PINS)
+# CONFIG (XIAO ESP32C3 PIN MAP)
 # ----------------------------
-DAH_PIN = board.IO14   # TRRS RIGHT (row 26)
-DIT_PIN = board.A3     # TRRS LEFT  (row 29) - this is what your board resolved to
+# TRRS tip (left) -> GPIO7 (board.D5)
+# TRRS ring (right) -> GPIO21 (board.D6)
+DIT_PIN = board.D5     # TRRS TIP / left (GPIO7)
+DAH_PIN = board.D6     # TRRS RING / right (GPIO21)
 DEBOUNCE_S = 0.010     # 10ms debounce
 
 # ----------------------------
@@ -109,7 +111,7 @@ def safe_uart_write(event_text: str) -> None:
             print("UART write failed:", repr(exc))
             last_uart_error = now
 
-print("=== MorseForge TRRS + BLE (ESP32-C6) ===")
+print("=== MorseForge TRRS + BLE (Seeed XIAO ESP32C3) ===")
 print("DIT pin:", DIT_PIN)
 print("DAH pin:", DAH_PIN)
 print("Debounce:", int(DEBOUNCE_S * 1000), "ms")
