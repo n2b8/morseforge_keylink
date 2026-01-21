@@ -1,6 +1,7 @@
 # Building MorseForge Keylink for iOS and Android
 
-Since this app uses native modules (BLE), you cannot use Expo Go. You need to create a development build.
+Since this app uses native modules (external keyboard support), you cannot use
+Expo Go. You need to create a development build.
 
 ## Option 1: Build Locally with Xcode (Recommended for Testing)
 
@@ -73,7 +74,7 @@ npx expo start --dev-client
 
 3. Follow on-screen instructions to build and install on your device
 
-## Android (Physical Device Required for BLE)
+## Android (Physical Device Required for External Keyboard Input)
 
 1. Install dependencies:
 ```bash
@@ -86,7 +87,7 @@ npm install
 npx expo run:android
 ```
 
-3. Grant Nearby Devices and Location permissions when prompted
+3. Pair Keylink as a Bluetooth keyboard in system settings
 
 ## Troubleshooting
 
@@ -99,9 +100,6 @@ npx expo run:android
 - Make sure your iPhone trusts your Mac
 - Check that Developer Mode is enabled on iOS 16+ (Settings > Privacy & Security > Developer Mode)
 
-### BLE not working
-- Ensure Bluetooth is enabled on your iPhone
-- Grant Bluetooth permissions when prompted
-- Check that your ESP32 is powered on and running the firmware
-- If scans return nothing, toggle Scan Filter to "All" and try again
-- Ensure `newArchEnabled` is true in `app.json` (required for `react-native-ble-manager`)
+### No key events
+- Ensure Keylink is paired and connected as a keyboard
+- Tap **Focus Input** in the app to regain keyboard focus

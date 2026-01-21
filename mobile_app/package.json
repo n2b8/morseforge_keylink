@@ -9,14 +9,13 @@
     "web": "expo start --web"
   },
   "dependencies": {
-    "buffer": "^6.0.3",
     "expo": "~54.0.31",
     "expo-av": "^16.0.8",
     "expo-build-properties": "^1.0.10",
     "expo-status-bar": "~3.0.9",
     "react": "19.1.0",
     "react-native": "0.81.5",
-    "react-native-ble-manager": "^12.4.3"
+    "react-native-external-keyboard": "^0.6.8"
   },
   "private": true
 }

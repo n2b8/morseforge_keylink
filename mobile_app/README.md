@@ -1,13 +1,13 @@
 # MorseForge Keylink Mobile App
 
-Expo React Native app for connecting to the MorseForge Keylink BLE device and playing morse key tones.
+Expo React Native app for receiving Morse key input from a BLE HID keyboard
+(Keylink) and playing sidetone audio.
 
 ## Features
 
-- BLE connectivity to ESP32 morse key device
+- External keyboard input (Ctrl+[ / Ctrl+]) from Keylink
 - Real-time audio sidetone playback
-- Supports DIT_DOWN/UP and DAH_DOWN/UP events for continuous tones
-- Dark theme UI
+- Straight + iambic keyer modes
 - Event logging
 
 ## Setup
@@ -19,27 +19,25 @@ cd mobile_app
 npm install
 ```
 
-### 2. Run on iOS (Physical Device Required for BLE)
+### 2. Run on iOS (Physical Device Required)
 
 ```bash
 npx expo run:ios
 ```
 
-**Note:** BLE requires a physical device and a native build. Expo Go does not include
-`react-native-ble-manager`, so use a dev build (see `BUILDING.md`).
+**Note:** This app uses a native module (`react-native-external-keyboard`), so
+Expo Go will not work. Use a dev build (see `BUILDING.md`).
 
-### 3. Flash your ESP32 device
+### 3. Flash your Keylink device
 
-Make sure your ESP32 is flashed with the firmware from `../software/code.py`. The device should advertise as "MorseKey" over BLE.
+Flash the Arduino firmware from:
+`../software/keylink_ble_keyboard/keylink_ble_keyboard.ino`
 
 ### 4. Connect
 
-1. Open the app on your iPhone
-2. Tap "Scan" to search for nearby BLE devices
-   - Default scan uses the Nordic UART (NUS) service filter
-   - Switch to "All" if you want to see every nearby BLE device
-3. Tap "Connect" on your "MorseKey" device
-4. Press your morse key paddles - you should hear tones!
+1. Pair Keylink in your phone's Bluetooth settings (it appears as "Keylink").
+2. Open the app and tap **Focus Input** if needed.
+3. Press the paddles to hear tones.
 
 ## Configuration
 
@@ -52,18 +50,14 @@ The app supports three keyer modes:
 
 Switch modes using the mode selector buttons in the app.
 
-### BLE Protocol
+### Input Protocol
 
-The firmware sends key state messages in the format: `K{key}:{state}`
+The firmware sends BLE HID key combos:
+- DIT (left paddle): **Ctrl + [**
+- DAH (right paddle): **Ctrl + ]**
 
-- `K1:1` - Key 1 (dit/left paddle) pressed
-- `K1:0` - Key 1 (dit/left paddle) released
-- `K2:1` - Key 2 (dah/right paddle) pressed
-- `K2:0` - Key 2 (dah/right paddle) released
-
-**BLE UUIDs:**
-- Service: `6e400001-b5a3-f393-e0a9-e50e24dcca9e` (Nordic UART Service)
-- TX Characteristic: `6e400003-b5a3-f393-e0a9-e50e24dcca9e`
+The app listens for these external keyboard events using
+`react-native-external-keyboard`.
 
 ### Tone Timing
 
@@ -98,31 +92,22 @@ eas build --platform android
 
 ## Troubleshooting
 
-### "Audio: Loading..." never changes
-- Check that `assets/tone.wav` exists
-- Check console for audio initialization errors
-
-### Can't find device
-- Ensure ESP32 is powered on and running code.py
-- Device must advertise as "MorseKey"
-- Check BLE permissions are granted
-- In the app, try switching Scan Filter to "All"
-- Verify the device is visible in a scanner app (nRF Connect / LightBlue)
-- If the device prints "BLE libraries not found", install `adafruit_ble` into `CIRCUITPY/lib`
-- On Android 11 and below, Location Services must be enabled for BLE scanning
-- Ensure `newArchEnabled` is true in `app.json` (required for `react-native-ble-manager`)
+### No key events
+- Ensure Keylink is paired as a Bluetooth keyboard in system settings
+- Tap **Focus Input** in the app to regain keyboard focus
+- Verify the firmware is flashed and powered on
 
 ### No audio on key press
 - Check phone is not in silent mode (iOS)
-- Ensure connection is established (status shows "Connected")
-- Check event log for incoming messages
+- Ensure `assets/tone.wav` exists
+- Check console for audio initialization errors
 
 ## Project Structure
 
 ```
 mobile_app/
 ├── App.js           # Main application code
-├── app.json         # Expo configuration with BLE permissions
+├── app.json         # Expo configuration
 ├── package.json     # Dependencies
 ├── assets/
 │   └── tone.wav     # Sidetone audio file

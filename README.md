@@ -55,6 +55,8 @@ This revision has been fabricated via OSH Park and is undergoing validation.
 hardware/
 ├── keylink_revB/     # KiCad schematic + PCB layout
 ├── gerber/           # Manufacturing Gerbers
+mobile_app/           # React Native example app
+software/             # Firmware (Arduino + legacy)
 ```
 
 Additional firmware and software directories will be added as development progresses.
@@ -63,12 +65,24 @@ Additional firmware and software directories will be added as development progre
 
 ## Firmware & App Integration
 
-Firmware for the ESP32‑C3 and BLE integration with MorseForge is planned and will live in this repository.
+Keylink firmware now uses the Arduino framework and exposes the device as a BLE
+HID keyboard for Vail Adapter compatibility. The sketch lives at:
+`software/keylink_ble_keyboard/keylink_ble_keyboard.ino`.
 
-The long‑term goal is seamless pairing between Keylink and the MorseForge mobile app, enabling:
-- External key input
-- Practice and training modes
-- Real‑time Morse decoding and feedback
+Key events:
+- DIT (left paddle) sends Ctrl + [
+- DAH (right paddle) sends Ctrl + ]
+
+### Flashing (Arduino)
+
+1. Install Arduino IDE and the ESP32 board package.
+2. Install the "ESP32 BLE Keyboard" library (T-vK).
+3. Open `software/keylink_ble_keyboard` in Arduino IDE.
+4. Select board "Seeed XIAO ESP32C3" and flash.
+5. Pair the device as "Keylink" in your OS Bluetooth settings.
+
+The prior CircuitPython UART firmware remains at `software/code.py` for
+reference but is not Vail-compatible.
 
 ---
 
